@@ -1,9 +1,9 @@
 package utils
 
 import (
-	"errors"
 	"fmt"
 	"github.com/mpvl/unique"
+	"github.com/otterize/intents-operator/src/shared/errors"
 	"github.com/sirupsen/logrus"
 	"os"
 	"regexp"
@@ -21,7 +21,7 @@ func ScanProcDirProcesses(callback ProcessScanCallback) error {
 	hostProcDir := viper.GetString(config.HostProcDirKey)
 	files, err := os.ReadDir(hostProcDir)
 	if err != nil {
-		return err
+		return errors.Wrap(err)
 	}
 
 	for _, f := range files {
@@ -36,10 +36,37 @@ func ScanProcDirProcesses(callback ProcessScanCallback) error {
 }
 
 func ExtractProcessHostname(pDir string) (string, error) {
+	if viper.GetBool(config.UseExtendedProcfsResolutionKey) {
+		hostname, found, err := extractProcessHostnameUsingEtcHostname(pDir)
+		if err != nil {
+			return "", errors.Wrap(err)
+		}
+		if found {
+			return hostname, nil
+		}
+	}
+	return extractProcessHostnameUsingEnviron(pDir)
+
+}
+
+func extractProcessHostnameUsingEtcHostname(pDir string) (string, bool, error) {
+	// Read the environment variables from the proc filesystem
+	data, err := os.ReadFile(fmt.Sprintf("%s/root/etc/hostname", pDir))
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, errors.Wrap(err)
+	}
+
+	return strings.TrimSpace(string(data)), true, nil
+}
+
+func extractProcessHostnameUsingEnviron(pDir string) (string, error) {
 	// Read the environment variables from the proc filesystem
 	data, err := os.ReadFile(fmt.Sprintf("%s/environ", pDir))
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err)
 	}
 
 	// Split the environment variables by null byte
@@ -57,14 +84,13 @@ func ExtractProcessHostname(pDir string) (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("couldn't find hostname in %s/environ", pDir)
-
+	return "", errors.Errorf("couldn't find hostname in %s/environ", pDir)
 }
 
 func ExtractProcessIPAddr(pDir string) (string, error) {
 	contentBytes, err := os.ReadFile(fmt.Sprintf("%s/net/fib_trie", pDir))
 	if err != nil {
-		return "", err
+		return "", errors.Wrap(err)
 	}
 
 	content := string(contentBytes)

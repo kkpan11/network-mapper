@@ -1,7 +1,13 @@
 package intentsstore
 
 import (
+	"context"
 	"encoding/json"
+	"github.com/otterize/intents-operator/src/shared/errors"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/amit7itz/goset"
 	"github.com/otterize/network-mapper/src/mapper/pkg/config"
 	"github.com/otterize/network-mapper/src/mapper/pkg/graph/model"
@@ -9,9 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/exp/slices"
 	"k8s.io/apimachinery/pkg/types"
-	"strings"
-	"sync"
-	"time"
 )
 
 type IntentsStoreKey struct {
@@ -31,6 +34,7 @@ type IntentsHolder struct {
 	accumulatingStore IntentsStore
 	sinceLastGetStore IntentsStore
 	lock              sync.Mutex
+	callbacks         []func(context.Context, []TimestampedIntent)
 }
 
 func NewIntentsHolder() *IntentsHolder {
@@ -38,6 +42,7 @@ func NewIntentsHolder() *IntentsHolder {
 		accumulatingStore: make(IntentsStore),
 		sinceLastGetStore: make(IntentsStore),
 		lock:              sync.Mutex{},
+		callbacks:         make([]func(context.Context, []TimestampedIntent), 0),
 	}
 }
 
@@ -153,6 +158,31 @@ func (i *IntentsHolder) addIntentToStore(store IntentsStore, newTimestamp time.T
 	store[key] = existingIntent
 }
 
+func (i *IntentsHolder) PeriodicIntentsUpload(ctx context.Context, interval time.Duration) {
+	logrus.Info("Starting periodic intents upload")
+
+	for {
+		select {
+		case <-time.After(interval):
+			if len(i.callbacks) == 0 {
+				return
+			}
+
+			intents := i.GetNewIntentsSinceLastGet()
+			for _, callback := range i.callbacks {
+				callback(ctx, intents)
+			}
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func (i *IntentsHolder) RegisterNotifyIntents(callback func(context.Context, []TimestampedIntent)) {
+	i.callbacks = append(i.callbacks, callback)
+}
+
 func (i *IntentsHolder) AddIntent(newTimestamp time.Time, intent model.Intent) {
 	if config.ExcludedNamespaces().Contains(intent.Client.Namespace) || config.ExcludedNamespaces().Contains(intent.Server.Namespace) {
 		return
@@ -197,7 +227,7 @@ func (i *IntentsHolder) GetIntents(
 		serverFilter)
 
 	if err != nil {
-		return []TimestampedIntent{}, err
+		return []TimestampedIntent{}, errors.Wrap(err)
 	}
 	return result, nil
 }
@@ -244,7 +274,7 @@ func (i *IntentsHolder) getIntentsFromStore(
 	for pair, intent := range store {
 		intentCopy, err := getIntentDeepCopy(intent)
 		if err != nil {
-			return result, err
+			return result, errors.Wrap(err)
 		}
 
 		if len(excludeServiceWithLabels) != 0 && intentCopy.containsExcludedLabels(excludedLabelsMap) {
@@ -294,10 +324,10 @@ func getIntentDeepCopy(intent TimestampedIntent) (TimestampedIntent, error) {
 	intentCopy := TimestampedIntent{}
 	intentJSON, err := json.Marshal(intent)
 	if err != nil {
-		return TimestampedIntent{}, err
+		return TimestampedIntent{}, errors.Wrap(err)
 	}
 	if err = json.Unmarshal(intentJSON, &intentCopy); err != nil {
-		return TimestampedIntent{}, err
+		return TimestampedIntent{}, errors.Wrap(err)
 	}
 	return intentCopy, nil
 }

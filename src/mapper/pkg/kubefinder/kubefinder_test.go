@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/otterize/network-mapper/src/shared/testbase"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/suite"
 	corev1 "k8s.io/api/core/v1"
 	"testing"
@@ -17,12 +18,12 @@ type KubeFinderTestSuite struct {
 func (s *KubeFinderTestSuite) SetupTest() {
 	s.ControllerManagerTestSuiteBase.SetupTest()
 	var err error
-	s.kubeFinder, err = NewKubeFinder(s.Mgr)
+	s.kubeFinder, err = NewKubeFinder(context.Background(), s.Mgr)
 	s.Require().NoError(err)
 }
 
 func (s *KubeFinderTestSuite) TestResolveIpToPod() {
-	pod, err := s.kubeFinder.ResolveIpToPod(context.Background(), "1.1.1.1")
+	pod, err := s.kubeFinder.ResolveIPToPod(context.Background(), "1.1.1.1")
 	s.Require().Nil(pod)
 	s.Require().Error(err)
 
@@ -31,39 +32,84 @@ func (s *KubeFinderTestSuite) TestResolveIpToPod() {
 	s.AddPod("pod-with-no-ip", "", nil, nil)
 	s.Require().True(s.Mgr.GetCache().WaitForCacheSync(context.Background()))
 
-	pod, err = s.kubeFinder.ResolveIpToPod(context.Background(), "1.1.1.1")
+	pod, err = s.kubeFinder.ResolveIPToPod(context.Background(), "1.1.1.1")
 	s.Require().NoError(err)
 	s.Require().Equal("test-pod", pod.Name)
 
 }
 
 func (s *KubeFinderTestSuite) TestResolveServiceAddressToIps() {
-	_, err := s.kubeFinder.ResolveServiceAddressToIps(context.Background(), "www.google.com")
+	_, _, err := s.kubeFinder.ResolveServiceAddressToPods(context.Background(), "www.google.com")
 	s.Require().Error(err)
 
-	_, err = s.kubeFinder.ResolveServiceAddressToIps(context.Background(), fmt.Sprintf("service1.%s.svc.cluster.local", s.TestNamespace))
+	_, _, err = s.kubeFinder.ResolveServiceAddressToPods(context.Background(), fmt.Sprintf("svc-service1.%s.svc.cluster.local", s.TestNamespace))
 	s.Require().Error(err)
 
 	podIp0 := "1.1.1.1"
 	podIp1 := "1.1.1.2"
 	podIp2 := "1.1.1.3"
 	s.Require().NoError(s.Mgr.GetClient().List(context.Background(), &corev1.EndpointsList{})) // Workaround: make then client start caching Endpoints, so when we do "WaitForCacheSync" it will actually sync cache"
-	s.AddDeploymentWithService("service0", []string{podIp0}, map[string]string{"app": "service0"})
-	s.AddDeploymentWithService("service1", []string{podIp1, podIp2}, map[string]string{"app": "service1"})
+	s.AddDeploymentWithService("service0", []string{podIp0}, map[string]string{"app": "service0"}, "10.0.0.10")
+	_, _, retPods := s.AddDeploymentWithService("service1", []string{podIp1, podIp2}, map[string]string{"app": "service1"}, "10.0.0.11")
 	s.Require().True(s.Mgr.GetCache().WaitForCacheSync(context.Background()))
 
-	ips, err := s.kubeFinder.ResolveServiceAddressToIps(context.Background(), fmt.Sprintf("service1.%s.svc.cluster.local", s.TestNamespace))
+	pods, service, err := s.kubeFinder.ResolveServiceAddressToPods(context.Background(), fmt.Sprintf("svc-service1.%s.svc.cluster.local", s.TestNamespace))
 	s.Require().NoError(err)
-	s.Require().ElementsMatch(ips, []string{podIp1, podIp2})
+	s.Require().Equal("svc-service1", service.Name)
+	s.Require().ElementsMatch(lo.Map(pods, func(p corev1.Pod, _ int) string { return p.Status.PodIP }), lo.Map(retPods, func(p *corev1.Pod, _ int) string { return p.Status.PodIP }))
 
 	// make sure we don't fail on the longer forms of k8s service addresses, listed on this page: https://kubernetes.io/docs/concepts/services-networking/dns-pod-service
-	ips, err = s.kubeFinder.ResolveServiceAddressToIps(context.Background(), fmt.Sprintf("4-4-4-4.service1.%s.svc.cluster.local", s.TestNamespace))
+	pods, service, err = s.kubeFinder.ResolveServiceAddressToPods(context.Background(), fmt.Sprintf("4-4-4-4.svc-service1.%s.svc.cluster.local", s.TestNamespace))
+	s.Require().Equal("svc-service1", service.Name)
 	s.Require().NoError(err)
-	s.Require().ElementsMatch(ips, []string{podIp1, podIp2})
+	s.Require().ElementsMatch(lo.Map(pods, func(p corev1.Pod, _ int) string { return p.Status.PodIP }), lo.Map(retPods, func(p *corev1.Pod, _ int) string { return p.Status.PodIP }))
 
-	ips, err = s.kubeFinder.ResolveServiceAddressToIps(context.Background(), fmt.Sprintf("4-4-4-4.%s.pod.cluster.local", s.TestNamespace))
+	_, _, err = s.kubeFinder.ResolveServiceAddressToPods(context.Background(), fmt.Sprintf("4-4-4-4.%s.pod.cluster.local", s.TestNamespace))
+	s.Require().Error(err)
+	s.Require().True(s.Mgr.GetCache().WaitForCacheSync(context.Background()))
+
+	_, pods4444 := s.AddDeployment("depl", []string{"4.4.4.4"}, map[string]string{"app": "4444"})
+	pods, service, err = s.kubeFinder.ResolveServiceAddressToPods(context.Background(), fmt.Sprintf("4-4-4-4.%s.pod.cluster.local", s.TestNamespace))
 	s.Require().NoError(err)
-	s.Require().ElementsMatch(ips, []string{"4.4.4.4"})
+	s.Require().Empty(service)
+	s.Require().ElementsMatch(lo.Map(pods, func(p corev1.Pod, _ int) string { return p.Status.PodIP }), lo.Map(pods4444, func(p *corev1.Pod, _ int) string { return p.Status.PodIP }))
+}
+
+func (s *KubeFinderTestSuite) TestIsSrcIpClusterInternal() {
+	pod := s.AddPod("test-pod", "1.1.1.1", nil, nil)
+	s.Require().True(s.Mgr.GetCache().WaitForCacheSync(context.Background()))
+
+	// Check with existing pod's ip
+	isInternal, err := s.kubeFinder.IsSrcIpClusterInternal(context.Background(), "1.1.1.1")
+	s.Require().NoError(err)
+	s.Require().True(isInternal)
+
+	// Check with non-existing pod's ip
+	isInternal, err = s.kubeFinder.IsSrcIpClusterInternal(context.Background(), "8.8.8.8")
+	s.Require().NoError(err)
+	s.Require().False(isInternal)
+
+	err = s.Mgr.GetClient().Delete(context.Background(), pod)
+	s.Require().NoError(err)
+	s.Require().True(s.Mgr.GetCache().WaitForCacheSync(context.Background()))
+
+	// Check pod doesn't exist in the manager's cache
+	pod, err = s.kubeFinder.ResolveIPToPod(context.Background(), "1.1.1.1")
+	s.Require().Nil(pod)
+	s.Require().Error(err)
+
+	// Check isInternal with the deleted pod's ip
+	isInternal, err = s.kubeFinder.IsSrcIpClusterInternal(context.Background(), "1.1.1.1")
+	s.Require().NoError(err)
+	s.Require().True(isInternal)
+
+	// Reset the cache
+	s.kubeFinder.initSeenIPsCache()
+
+	// Check isInternal with the deleted pod's ip after cache reset
+	isInternal, err = s.kubeFinder.IsSrcIpClusterInternal(context.Background(), "1.1.1.1")
+	s.Require().NoError(err)
+	s.Require().False(isInternal)
 }
 
 func TestKubeFinderTestSuite(t *testing.T) {

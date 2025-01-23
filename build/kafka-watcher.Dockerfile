@@ -1,4 +1,4 @@
-FROM --platform=linux/amd64 golang:1.19-alpine as buildenv
+FROM --platform=$BUILDPLATFORM golang:1.22.1-alpine as buildenv
 RUN apk add --no-cache ca-certificates git protoc
 RUN apk add build-base libpcap-dev
 WORKDIR /src
@@ -15,7 +15,7 @@ RUN go test ./kafka-watcher/...
 FROM test as builder
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /main ./kafka-watcher/cmd
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /main ./kafka-watcher/cmd
 
 # add version file
 ARG VERSION

@@ -9,38 +9,75 @@ import (
 	"time"
 )
 
+type AWSOperation struct {
+	Resource string          `json:"resource"`
+	Actions  []string        `json:"actions"`
+	SrcIP    *string         `json:"srcIp,omitempty"`
+	Client   *NamespacedName `json:"client,omitempty"`
+}
+
+type AzureOperation struct {
+	Scope           string   `json:"scope"`
+	Actions         []string `json:"actions"`
+	DataActions     []string `json:"dataActions"`
+	ClientName      string   `json:"clientName"`
+	ClientNamespace string   `json:"clientNamespace"`
+}
+
 type CaptureResults struct {
 	Results []RecordedDestinationsForSrc `json:"results"`
 }
 
+type CaptureTCPResults struct {
+	Results []RecordedDestinationsForSrc `json:"results"`
+}
+
 type Destination struct {
-	Destination string    `json:"destination"`
-	LastSeen    time.Time `json:"lastSeen"`
+	Destination     string    `json:"destination"`
+	DestinationIP   *string   `json:"destinationIP,omitempty"`
+	DestinationPort *int64    `json:"destinationPort,omitempty"`
+	TTL             *int64    `json:"TTL,omitempty"`
+	LastSeen        time.Time `json:"lastSeen"`
 }
 
 type GroupVersionKind struct {
-	Group   *string `json:"group"`
+	Group   *string `json:"group,omitempty"`
 	Version string  `json:"version"`
 	Kind    string  `json:"kind"`
 }
 
 type HTTPResource struct {
 	Path    string       `json:"path"`
-	Methods []HTTPMethod `json:"methods"`
+	Methods []HTTPMethod `json:"methods,omitempty"`
+}
+
+type IdentityResolutionData struct {
+	Host              *string `json:"host,omitempty"`
+	PodHostname       *string `json:"podHostname,omitempty"`
+	ProcfsHostname    *string `json:"procfsHostname,omitempty"`
+	Port              *int64  `json:"port,omitempty"`
+	IsService         *bool   `json:"isService,omitempty"`
+	Uptime            *string `json:"uptime,omitempty"`
+	LastSeen          *string `json:"lastSeen,omitempty"`
+	ExtraInfo         *string `json:"extraInfo,omitempty"`
+	HasLinkerdSidecar *bool   `json:"hasLinkerdSidecar,omitempty"`
 }
 
 type Intent struct {
-	Client        *OtterizeServiceIdentity `json:"client"`
-	Server        *OtterizeServiceIdentity `json:"server"`
-	Type          *IntentType              `json:"type"`
-	KafkaTopics   []KafkaConfig            `json:"kafkaTopics"`
-	HTTPResources []HTTPResource           `json:"httpResources"`
+	Client         *OtterizeServiceIdentity `json:"client"`
+	Server         *OtterizeServiceIdentity `json:"server"`
+	Type           *IntentType              `json:"type,omitempty"`
+	ResolutionData *string                  `json:"resolutionData,omitempty"`
+	KafkaTopics    []KafkaConfig            `json:"kafkaTopics,omitempty"`
+	HTTPResources  []HTTPResource           `json:"httpResources,omitempty"`
+	AwsActions     []string                 `json:"awsActions,omitempty"`
 }
 
 type IstioConnection struct {
 	SrcWorkload          string       `json:"srcWorkload"`
 	SrcWorkloadNamespace string       `json:"srcWorkloadNamespace"`
 	DstWorkload          string       `json:"dstWorkload"`
+	DstServiceName       string       `json:"dstServiceName"`
 	DstWorkloadNamespace string       `json:"dstWorkloadNamespace"`
 	Path                 string       `json:"path"`
 	Methods              []HTTPMethod `json:"methods"`
@@ -53,7 +90,7 @@ type IstioConnectionResults struct {
 
 type KafkaConfig struct {
 	Name       string           `json:"name"`
-	Operations []KafkaOperation `json:"operations"`
+	Operations []KafkaOperation `json:"operations,omitempty"`
 }
 
 type KafkaMapperResult struct {
@@ -69,17 +106,31 @@ type KafkaMapperResults struct {
 	Results []KafkaMapperResult `json:"results"`
 }
 
+type Mutation struct {
+}
+
+type NamespacedName struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
 type OtterizeServiceIdentity struct {
-	Name      string     `json:"name"`
-	Namespace string     `json:"namespace"`
-	Labels    []PodLabel `json:"labels"`
+	Name           string                  `json:"name"`
+	Namespace      string                  `json:"namespace"`
+	Labels         []PodLabel              `json:"labels,omitempty"`
+	ResolutionData *IdentityResolutionData `json:"resolutionData,omitempty"`
 	// If the service identity was resolved from a pod owner, the GroupVersionKind of the pod owner.
-	PodOwnerKind *GroupVersionKind `json:"podOwnerKind"`
+	PodOwnerKind *GroupVersionKind `json:"podOwnerKind,omitempty"`
+	// If the service identity was resolved from a Kubernetes service, its name.
+	KubernetesService *string `json:"kubernetesService,omitempty"`
 }
 
 type PodLabel struct {
 	Key   string `json:"key"`
 	Value string `json:"value"`
+}
+
+type Query struct {
 }
 
 type RecordedDestinationsForSrc struct {
@@ -160,18 +211,24 @@ func (e HTTPMethod) MarshalGQL(w io.Writer) {
 type IntentType string
 
 const (
-	IntentTypeKafka IntentType = "KAFKA"
-	IntentTypeHTTP  IntentType = "HTTP"
+	IntentTypeHTTP     IntentType = "HTTP"
+	IntentTypeKafka    IntentType = "KAFKA"
+	IntentTypeDatabase IntentType = "DATABASE"
+	IntentTypeAws      IntentType = "AWS"
+	IntentTypeS3       IntentType = "S3"
 )
 
 var AllIntentType = []IntentType{
-	IntentTypeKafka,
 	IntentTypeHTTP,
+	IntentTypeKafka,
+	IntentTypeDatabase,
+	IntentTypeAws,
+	IntentTypeS3,
 }
 
 func (e IntentType) IsValid() bool {
 	switch e {
-	case IntentTypeKafka, IntentTypeHTTP:
+	case IntentTypeHTTP, IntentTypeKafka, IntentTypeDatabase, IntentTypeAws, IntentTypeS3:
 		return true
 	}
 	return false
@@ -211,7 +268,7 @@ const (
 	KafkaOperationClusterAction   KafkaOperation = "CLUSTER_ACTION"
 	KafkaOperationDescribeConfigs KafkaOperation = "DESCRIBE_CONFIGS"
 	KafkaOperationAlterConfigs    KafkaOperation = "ALTER_CONFIGS"
-	KafkaOperationIDEmpotentWrite KafkaOperation = "IDEMPOTENT_WRITE"
+	KafkaOperationIdempotentWrite KafkaOperation = "IDEMPOTENT_WRITE"
 )
 
 var AllKafkaOperation = []KafkaOperation{
@@ -225,12 +282,12 @@ var AllKafkaOperation = []KafkaOperation{
 	KafkaOperationClusterAction,
 	KafkaOperationDescribeConfigs,
 	KafkaOperationAlterConfigs,
-	KafkaOperationIDEmpotentWrite,
+	KafkaOperationIdempotentWrite,
 }
 
 func (e KafkaOperation) IsValid() bool {
 	switch e {
-	case KafkaOperationAll, KafkaOperationConsume, KafkaOperationProduce, KafkaOperationCreate, KafkaOperationAlter, KafkaOperationDelete, KafkaOperationDescribe, KafkaOperationClusterAction, KafkaOperationDescribeConfigs, KafkaOperationAlterConfigs, KafkaOperationIDEmpotentWrite:
+	case KafkaOperationAll, KafkaOperationConsume, KafkaOperationProduce, KafkaOperationCreate, KafkaOperationAlter, KafkaOperationDelete, KafkaOperationDescribe, KafkaOperationClusterAction, KafkaOperationDescribeConfigs, KafkaOperationAlterConfigs, KafkaOperationIdempotentWrite:
 		return true
 	}
 	return false

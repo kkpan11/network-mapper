@@ -1,7 +1,7 @@
 package ipresolver
 
 import (
-	"errors"
+	"github.com/otterize/intents-operator/src/shared/errors"
 	"github.com/otterize/network-mapper/src/sniffer/pkg/utils"
 	"github.com/sirupsen/logrus"
 )
@@ -29,11 +29,11 @@ func NewProcFSIPResolver() *ProcFSIPResolver {
 	return &r
 }
 
-func (r *ProcFSIPResolver) ResolveIP(ipaddr string) (hostname string, err error) {
+func (r *ProcFSIPResolver) ResolveIP(ipaddr string) (hostname string, ok bool) {
 	if hostInfo, ok := r.byAddr[ipaddr]; ok {
-		return hostInfo.Hostname, nil
+		return hostInfo.Hostname, true
 	}
-	return "", errors.New("ip not found")
+	return "", false
 }
 
 func (r *ProcFSIPResolver) Refresh() error {
@@ -45,13 +45,13 @@ func (r *ProcFSIPResolver) onProcessNew(pid int64, pDir string) (err error) {
 	hostname, err = utils.ExtractProcessHostname(pDir)
 	if err != nil {
 		logrus.Debugf("Failed to extract hostname for process %d: %v", pid, err)
-		return err
+		return errors.Wrap(err)
 	}
 
 	ipaddr, err = utils.ExtractProcessIPAddr(pDir)
 	if err != nil {
 		logrus.Debugf("Failed to extract IP address for process %d: %v", pid, err)
-		return err
+		return errors.Wrap(err)
 	}
 
 	if entry, ok := r.byAddr[ipaddr]; ok {

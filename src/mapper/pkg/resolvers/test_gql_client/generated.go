@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Khan/genqlient/graphql"
+	"github.com/otterize/nilable"
 )
 
 type CaptureResults struct {
@@ -16,13 +17,32 @@ type CaptureResults struct {
 // GetResults returns CaptureResults.Results, and is useful for accessing the field via an interface.
 func (v *CaptureResults) GetResults() []RecordedDestinationsForSrc { return v.Results }
 
+type CaptureTCPResults struct {
+	Results []RecordedDestinationsForSrc `json:"results"`
+}
+
+// GetResults returns CaptureTCPResults.Results, and is useful for accessing the field via an interface.
+func (v *CaptureTCPResults) GetResults() []RecordedDestinationsForSrc { return v.Results }
+
 type Destination struct {
-	Destination string    `json:"destination"`
-	LastSeen    time.Time `json:"lastSeen"`
+	Destination     string                  `json:"destination"`
+	DestinationIP   nilable.Nilable[string] `json:"destinationIP"`
+	DestinationPort nilable.Nilable[int]    `json:"destinationPort"`
+	TTL             nilable.Nilable[int]    `json:"TTL"`
+	LastSeen        time.Time               `json:"lastSeen"`
 }
 
 // GetDestination returns Destination.Destination, and is useful for accessing the field via an interface.
 func (v *Destination) GetDestination() string { return v.Destination }
+
+// GetDestinationIP returns Destination.DestinationIP, and is useful for accessing the field via an interface.
+func (v *Destination) GetDestinationIP() nilable.Nilable[string] { return v.DestinationIP }
+
+// GetDestinationPort returns Destination.DestinationPort, and is useful for accessing the field via an interface.
+func (v *Destination) GetDestinationPort() nilable.Nilable[int] { return v.DestinationPort }
+
+// GetTTL returns Destination.TTL, and is useful for accessing the field via an interface.
+func (v *Destination) GetTTL() nilable.Nilable[int] { return v.TTL }
 
 // GetLastSeen returns Destination.LastSeen, and is useful for accessing the field via an interface.
 func (v *Destination) GetLastSeen() time.Time { return v.LastSeen }
@@ -48,7 +68,7 @@ type IntentsIntentsIntentClientOtterizeServiceIdentity struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
 	// If the service identity was resolved from a pod owner, the GroupVersionKind of the pod owner.
-	PodOwnerKind IntentsIntentsIntentClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind `json:"podOwnerKind"`
+	PodOwnerKind nilable.Nilable[IntentsIntentsIntentClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind] `json:"podOwnerKind"`
 }
 
 // GetName returns IntentsIntentsIntentClientOtterizeServiceIdentity.Name, and is useful for accessing the field via an interface.
@@ -58,19 +78,19 @@ func (v *IntentsIntentsIntentClientOtterizeServiceIdentity) GetName() string { r
 func (v *IntentsIntentsIntentClientOtterizeServiceIdentity) GetNamespace() string { return v.Namespace }
 
 // GetPodOwnerKind returns IntentsIntentsIntentClientOtterizeServiceIdentity.PodOwnerKind, and is useful for accessing the field via an interface.
-func (v *IntentsIntentsIntentClientOtterizeServiceIdentity) GetPodOwnerKind() IntentsIntentsIntentClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind {
+func (v *IntentsIntentsIntentClientOtterizeServiceIdentity) GetPodOwnerKind() nilable.Nilable[IntentsIntentsIntentClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind] {
 	return v.PodOwnerKind
 }
 
 // IntentsIntentsIntentClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind includes the requested fields of the GraphQL type GroupVersionKind.
 type IntentsIntentsIntentClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind struct {
-	Group   string `json:"group"`
-	Kind    string `json:"kind"`
-	Version string `json:"version"`
+	Group   nilable.Nilable[string] `json:"group"`
+	Kind    string                  `json:"kind"`
+	Version string                  `json:"version"`
 }
 
 // GetGroup returns IntentsIntentsIntentClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind.Group, and is useful for accessing the field via an interface.
-func (v *IntentsIntentsIntentClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind) GetGroup() string {
+func (v *IntentsIntentsIntentClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind) GetGroup() nilable.Nilable[string] {
 	return v.Group
 }
 
@@ -89,7 +109,9 @@ type IntentsIntentsIntentServerOtterizeServiceIdentity struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
 	// If the service identity was resolved from a pod owner, the GroupVersionKind of the pod owner.
-	PodOwnerKind IntentsIntentsIntentServerOtterizeServiceIdentityPodOwnerKindGroupVersionKind `json:"podOwnerKind"`
+	PodOwnerKind nilable.Nilable[IntentsIntentsIntentServerOtterizeServiceIdentityPodOwnerKindGroupVersionKind] `json:"podOwnerKind"`
+	// If the service identity was resolved from a Kubernetes service, its name.
+	KubernetesService nilable.Nilable[string] `json:"kubernetesService"`
 }
 
 // GetName returns IntentsIntentsIntentServerOtterizeServiceIdentity.Name, and is useful for accessing the field via an interface.
@@ -99,19 +121,24 @@ func (v *IntentsIntentsIntentServerOtterizeServiceIdentity) GetName() string { r
 func (v *IntentsIntentsIntentServerOtterizeServiceIdentity) GetNamespace() string { return v.Namespace }
 
 // GetPodOwnerKind returns IntentsIntentsIntentServerOtterizeServiceIdentity.PodOwnerKind, and is useful for accessing the field via an interface.
-func (v *IntentsIntentsIntentServerOtterizeServiceIdentity) GetPodOwnerKind() IntentsIntentsIntentServerOtterizeServiceIdentityPodOwnerKindGroupVersionKind {
+func (v *IntentsIntentsIntentServerOtterizeServiceIdentity) GetPodOwnerKind() nilable.Nilable[IntentsIntentsIntentServerOtterizeServiceIdentityPodOwnerKindGroupVersionKind] {
 	return v.PodOwnerKind
+}
+
+// GetKubernetesService returns IntentsIntentsIntentServerOtterizeServiceIdentity.KubernetesService, and is useful for accessing the field via an interface.
+func (v *IntentsIntentsIntentServerOtterizeServiceIdentity) GetKubernetesService() nilable.Nilable[string] {
+	return v.KubernetesService
 }
 
 // IntentsIntentsIntentServerOtterizeServiceIdentityPodOwnerKindGroupVersionKind includes the requested fields of the GraphQL type GroupVersionKind.
 type IntentsIntentsIntentServerOtterizeServiceIdentityPodOwnerKindGroupVersionKind struct {
-	Group   string `json:"group"`
-	Kind    string `json:"kind"`
-	Version string `json:"version"`
+	Group   nilable.Nilable[string] `json:"group"`
+	Kind    string                  `json:"kind"`
+	Version string                  `json:"version"`
 }
 
 // GetGroup returns IntentsIntentsIntentServerOtterizeServiceIdentityPodOwnerKindGroupVersionKind.Group, and is useful for accessing the field via an interface.
-func (v *IntentsIntentsIntentServerOtterizeServiceIdentityPodOwnerKindGroupVersionKind) GetGroup() string {
+func (v *IntentsIntentsIntentServerOtterizeServiceIdentityPodOwnerKindGroupVersionKind) GetGroup() nilable.Nilable[string] {
 	return v.Group
 }
 
@@ -171,6 +198,16 @@ func (v *ReportSocketScanResultsResponse) GetReportSocketScanResults() bool {
 	return v.ReportSocketScanResults
 }
 
+// ReportTCPCaptureResultsResponse is returned by ReportTCPCaptureResults on success.
+type ReportTCPCaptureResultsResponse struct {
+	ReportTCPCaptureResults bool `json:"reportTCPCaptureResults"`
+}
+
+// GetReportTCPCaptureResults returns ReportTCPCaptureResultsResponse.ReportTCPCaptureResults, and is useful for accessing the field via an interface.
+func (v *ReportTCPCaptureResultsResponse) GetReportTCPCaptureResults() bool {
+	return v.ReportTCPCaptureResults
+}
+
 type ServerFilter struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
@@ -218,7 +255,7 @@ type ServiceIntentsServiceIntentsClientOtterizeServiceIdentity struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
 	// If the service identity was resolved from a pod owner, the GroupVersionKind of the pod owner.
-	PodOwnerKind ServiceIntentsServiceIntentsClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind `json:"podOwnerKind"`
+	PodOwnerKind nilable.Nilable[ServiceIntentsServiceIntentsClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind] `json:"podOwnerKind"`
 }
 
 // GetName returns ServiceIntentsServiceIntentsClientOtterizeServiceIdentity.Name, and is useful for accessing the field via an interface.
@@ -230,19 +267,19 @@ func (v *ServiceIntentsServiceIntentsClientOtterizeServiceIdentity) GetNamespace
 }
 
 // GetPodOwnerKind returns ServiceIntentsServiceIntentsClientOtterizeServiceIdentity.PodOwnerKind, and is useful for accessing the field via an interface.
-func (v *ServiceIntentsServiceIntentsClientOtterizeServiceIdentity) GetPodOwnerKind() ServiceIntentsServiceIntentsClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind {
+func (v *ServiceIntentsServiceIntentsClientOtterizeServiceIdentity) GetPodOwnerKind() nilable.Nilable[ServiceIntentsServiceIntentsClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind] {
 	return v.PodOwnerKind
 }
 
 // ServiceIntentsServiceIntentsClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind includes the requested fields of the GraphQL type GroupVersionKind.
 type ServiceIntentsServiceIntentsClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind struct {
-	Group   string `json:"group"`
-	Kind    string `json:"kind"`
-	Version string `json:"version"`
+	Group   nilable.Nilable[string] `json:"group"`
+	Kind    string                  `json:"kind"`
+	Version string                  `json:"version"`
 }
 
 // GetGroup returns ServiceIntentsServiceIntentsClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind.Group, and is useful for accessing the field via an interface.
-func (v *ServiceIntentsServiceIntentsClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind) GetGroup() string {
+func (v *ServiceIntentsServiceIntentsClientOtterizeServiceIdentityPodOwnerKindGroupVersionKind) GetGroup() nilable.Nilable[string] {
 	return v.Group
 }
 
@@ -260,6 +297,8 @@ func (v *ServiceIntentsServiceIntentsClientOtterizeServiceIdentityPodOwnerKindGr
 type ServiceIntentsServiceIntentsIntentsOtterizeServiceIdentity struct {
 	Name      string `json:"name"`
 	Namespace string `json:"namespace"`
+	// If the service identity was resolved from a Kubernetes service, its name.
+	KubernetesService nilable.Nilable[string] `json:"kubernetesService"`
 }
 
 // GetName returns ServiceIntentsServiceIntentsIntentsOtterizeServiceIdentity.Name, and is useful for accessing the field via an interface.
@@ -268,6 +307,11 @@ func (v *ServiceIntentsServiceIntentsIntentsOtterizeServiceIdentity) GetName() s
 // GetNamespace returns ServiceIntentsServiceIntentsIntentsOtterizeServiceIdentity.Namespace, and is useful for accessing the field via an interface.
 func (v *ServiceIntentsServiceIntentsIntentsOtterizeServiceIdentity) GetNamespace() string {
 	return v.Namespace
+}
+
+// GetKubernetesService returns ServiceIntentsServiceIntentsIntentsOtterizeServiceIdentity.KubernetesService, and is useful for accessing the field via an interface.
+func (v *ServiceIntentsServiceIntentsIntentsOtterizeServiceIdentity) GetKubernetesService() nilable.Nilable[string] {
+	return v.KubernetesService
 }
 
 type SocketScanResults struct {
@@ -279,11 +323,11 @@ func (v *SocketScanResults) GetResults() []RecordedDestinationsForSrc { return v
 
 // __IntentsInput is used internally by genqlient
 type __IntentsInput struct {
-	Namespaces               []string      `json:"namespaces"`
-	IncludeLabels            []string      `json:"includeLabels"`
-	ExcludeServiceWithLabels []string      `json:"excludeServiceWithLabels"`
-	IncludeAllLabels         bool          `json:"includeAllLabels"`
-	Server                   *ServerFilter `json:"server"`
+	Namespaces               []string              `json:"namespaces"`
+	IncludeLabels            []string              `json:"includeLabels"`
+	ExcludeServiceWithLabels []string              `json:"excludeServiceWithLabels"`
+	IncludeAllLabels         nilable.Nilable[bool] `json:"includeAllLabels"`
+	Server                   *ServerFilter         `json:"server"`
 }
 
 // GetNamespaces returns __IntentsInput.Namespaces, and is useful for accessing the field via an interface.
@@ -296,7 +340,7 @@ func (v *__IntentsInput) GetIncludeLabels() []string { return v.IncludeLabels }
 func (v *__IntentsInput) GetExcludeServiceWithLabels() []string { return v.ExcludeServiceWithLabels }
 
 // GetIncludeAllLabels returns __IntentsInput.IncludeAllLabels, and is useful for accessing the field via an interface.
-func (v *__IntentsInput) GetIncludeAllLabels() bool { return v.IncludeAllLabels }
+func (v *__IntentsInput) GetIncludeAllLabels() nilable.Nilable[bool] { return v.IncludeAllLabels }
 
 // GetServer returns __IntentsInput.Server, and is useful for accessing the field via an interface.
 func (v *__IntentsInput) GetServer() *ServerFilter { return v.Server }
@@ -316,6 +360,14 @@ type __ReportSocketScanResultsInput struct {
 
 // GetResults returns __ReportSocketScanResultsInput.Results, and is useful for accessing the field via an interface.
 func (v *__ReportSocketScanResultsInput) GetResults() SocketScanResults { return v.Results }
+
+// __ReportTCPCaptureResultsInput is used internally by genqlient
+type __ReportTCPCaptureResultsInput struct {
+	Results CaptureTCPResults `json:"results"`
+}
+
+// GetResults returns __ReportTCPCaptureResultsInput.Results, and is useful for accessing the field via an interface.
+func (v *__ReportTCPCaptureResultsInput) GetResults() CaptureTCPResults { return v.Results }
 
 // __ServiceIntentsInput is used internally by genqlient
 type __ServiceIntentsInput struct {
@@ -346,21 +398,22 @@ query Intents ($namespaces: [String!], $includeLabels: [String!], $excludeServic
 				kind
 				version
 			}
+			kubernetesService
 		}
 	}
 }
 `
 
 func Intents(
-	ctx context.Context,
-	client graphql.Client,
+	ctx_ context.Context,
+	client_ graphql.Client,
 	namespaces []string,
 	includeLabels []string,
 	excludeServiceWithLabels []string,
-	includeAllLabels bool,
+	includeAllLabels nilable.Nilable[bool],
 	server *ServerFilter,
 ) (*IntentsResponse, error) {
-	req := &graphql.Request{
+	req_ := &graphql.Request{
 		OpName: "Intents",
 		Query:  Intents_Operation,
 		Variables: &__IntentsInput{
@@ -371,18 +424,18 @@ func Intents(
 			Server:                   server,
 		},
 	}
-	var err error
+	var err_ error
 
-	var data IntentsResponse
-	resp := &graphql.Response{Data: &data}
+	var data_ IntentsResponse
+	resp_ := &graphql.Response{Data: &data_}
 
-	err = client.MakeRequest(
-		ctx,
-		req,
-		resp,
+	err_ = client_.MakeRequest(
+		ctx_,
+		req_,
+		resp_,
 	)
 
-	return &data, err
+	return &data_, err_
 }
 
 // The query or mutation executed by ReportCaptureResults.
@@ -393,29 +446,29 @@ mutation ReportCaptureResults ($results: CaptureResults!) {
 `
 
 func ReportCaptureResults(
-	ctx context.Context,
-	client graphql.Client,
+	ctx_ context.Context,
+	client_ graphql.Client,
 	results CaptureResults,
 ) (*ReportCaptureResultsResponse, error) {
-	req := &graphql.Request{
+	req_ := &graphql.Request{
 		OpName: "ReportCaptureResults",
 		Query:  ReportCaptureResults_Operation,
 		Variables: &__ReportCaptureResultsInput{
 			Results: results,
 		},
 	}
-	var err error
+	var err_ error
 
-	var data ReportCaptureResultsResponse
-	resp := &graphql.Response{Data: &data}
+	var data_ ReportCaptureResultsResponse
+	resp_ := &graphql.Response{Data: &data_}
 
-	err = client.MakeRequest(
-		ctx,
-		req,
-		resp,
+	err_ = client_.MakeRequest(
+		ctx_,
+		req_,
+		resp_,
 	)
 
-	return &data, err
+	return &data_, err_
 }
 
 // The query or mutation executed by ReportSocketScanResults.
@@ -426,29 +479,62 @@ mutation ReportSocketScanResults ($results: SocketScanResults!) {
 `
 
 func ReportSocketScanResults(
-	ctx context.Context,
-	client graphql.Client,
+	ctx_ context.Context,
+	client_ graphql.Client,
 	results SocketScanResults,
 ) (*ReportSocketScanResultsResponse, error) {
-	req := &graphql.Request{
+	req_ := &graphql.Request{
 		OpName: "ReportSocketScanResults",
 		Query:  ReportSocketScanResults_Operation,
 		Variables: &__ReportSocketScanResultsInput{
 			Results: results,
 		},
 	}
-	var err error
+	var err_ error
 
-	var data ReportSocketScanResultsResponse
-	resp := &graphql.Response{Data: &data}
+	var data_ ReportSocketScanResultsResponse
+	resp_ := &graphql.Response{Data: &data_}
 
-	err = client.MakeRequest(
-		ctx,
-		req,
-		resp,
+	err_ = client_.MakeRequest(
+		ctx_,
+		req_,
+		resp_,
 	)
 
-	return &data, err
+	return &data_, err_
+}
+
+// The query or mutation executed by ReportTCPCaptureResults.
+const ReportTCPCaptureResults_Operation = `
+mutation ReportTCPCaptureResults ($results: CaptureTCPResults!) {
+	reportTCPCaptureResults(results: $results)
+}
+`
+
+func ReportTCPCaptureResults(
+	ctx_ context.Context,
+	client_ graphql.Client,
+	results CaptureTCPResults,
+) (*ReportTCPCaptureResultsResponse, error) {
+	req_ := &graphql.Request{
+		OpName: "ReportTCPCaptureResults",
+		Query:  ReportTCPCaptureResults_Operation,
+		Variables: &__ReportTCPCaptureResultsInput{
+			Results: results,
+		},
+	}
+	var err_ error
+
+	var data_ ReportTCPCaptureResultsResponse
+	resp_ := &graphql.Response{Data: &data_}
+
+	err_ = client_.MakeRequest(
+		ctx_,
+		req_,
+		resp_,
+	)
+
+	return &data_, err_
 }
 
 // The query or mutation executed by ServiceIntents.
@@ -467,33 +553,34 @@ query ServiceIntents ($namespaces: [String!]) {
 		intents {
 			name
 			namespace
+			kubernetesService
 		}
 	}
 }
 `
 
 func ServiceIntents(
-	ctx context.Context,
-	client graphql.Client,
+	ctx_ context.Context,
+	client_ graphql.Client,
 	namespaces []string,
 ) (*ServiceIntentsResponse, error) {
-	req := &graphql.Request{
+	req_ := &graphql.Request{
 		OpName: "ServiceIntents",
 		Query:  ServiceIntents_Operation,
 		Variables: &__ServiceIntentsInput{
 			Namespaces: namespaces,
 		},
 	}
-	var err error
+	var err_ error
 
-	var data ServiceIntentsResponse
-	resp := &graphql.Response{Data: &data}
+	var data_ ServiceIntentsResponse
+	resp_ := &graphql.Response{Data: &data_}
 
-	err = client.MakeRequest(
-		ctx,
-		req,
-		resp,
+	err_ = client_.MakeRequest(
+		ctx_,
+		req_,
+		resp_,
 	)
 
-	return &data, err
+	return &data_, err_
 }

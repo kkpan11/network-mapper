@@ -3,11 +3,14 @@ package testbase
 import (
 	"context"
 	"fmt"
+	"github.com/otterize/intents-operator/src/shared/errors"
 	"github.com/samber/lo"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/suite"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	networkingv1 "k8s.io/api/networking/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -16,6 +19,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"strings"
 	"time"
 )
@@ -34,34 +38,37 @@ type ControllerManagerTestSuiteBase struct {
 	Mgr              manager.Manager
 }
 
-func (s *ControllerManagerTestSuiteBase) SetupSuite() {
+func (s *ControllerManagerTestSuiteBase) SetupTest() {
 	s.testEnv = &envtest.Environment{}
 	var err error
 	s.cfg, err = s.testEnv.Start()
 	s.Require().NoError(err)
 	s.Require().NotNil(s.cfg)
+	logrus.SetLevel(logrus.DebugLevel)
 
 	s.K8sDirectClient, err = kubernetes.NewForConfig(s.cfg)
 	s.Require().NoError(err)
 	s.Require().NotNil(s.K8sDirectClient)
-}
-
-func (s *ControllerManagerTestSuiteBase) TearDownSuite() {
-	s.Require().NoError(s.testEnv.Stop())
-}
-
-func (s *ControllerManagerTestSuiteBase) SetupTest() {
 	s.mgrCtx, s.mgrCtxCancelFunc = context.WithCancel(context.Background())
 
-	var err error
-	s.Mgr, err = manager.New(s.cfg, manager.Options{MetricsBindAddress: "0"})
+	s.Mgr, err = manager.New(s.cfg, manager.Options{Metrics: server.Options{BindAddress: "0"}})
 	s.Require().NoError(err)
 	testName := s.T().Name()[strings.LastIndex(s.T().Name(), "/")+1:]
+	maxLen := 63 - len("-20060102150405")
+	if len(testName) > maxLen {
+		sliceStart := len(testName) - maxLen
+		testName = testName[sliceStart:]
+	}
 	s.TestNamespace = strings.ToLower(fmt.Sprintf("%s-%s", testName, time.Now().Format("20060102150405")))
 	testNamespaceObj := &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{Name: s.TestNamespace},
 	}
 	_, err = s.K8sDirectClient.CoreV1().Namespaces().Create(context.Background(), testNamespaceObj, metav1.CreateOptions{})
+	s.Require().NoError(err)
+	_, err = s.K8sDirectClient.CoreV1().Nodes().Create(context.Background(), &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+		Status:     corev1.NodeStatus{Addresses: []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "192.168.1.1"}}},
+	}, metav1.CreateOptions{})
 	s.Require().NoError(err)
 }
 
@@ -79,20 +86,26 @@ func (s *ControllerManagerTestSuiteBase) TearDownTest() {
 	s.mgrCtxCancelFunc()
 	err := s.K8sDirectClient.CoreV1().Namespaces().Delete(context.Background(), s.TestNamespace, metav1.DeleteOptions{})
 	s.Require().NoError(err)
+	s.Require().NoError(s.testEnv.Stop())
 }
 
 // waitForObjectToBeCreated tries to get an object multiple times until it is available in the k8s API server
 func (s *ControllerManagerTestSuiteBase) waitForObjectToBeCreated(obj client.Object) {
-	s.Require().NoError(wait.PollImmediate(waitForCreationInterval, waitForCreationTimeout, func() (done bool, err error) {
-		err = s.Mgr.GetClient().Get(context.Background(), types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, obj)
-		if errors.IsNotFound(err) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		return true, nil
-	}))
+	s.Require().NoError(wait.PollUntilContextTimeout(context.Background(),
+		waitForCreationInterval,
+		waitForCreationTimeout,
+		true,
+		func(ctx context.Context) (done bool, err error) {
+			err = s.Mgr.GetClient().Get(ctx, types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, obj)
+			if k8serrors.IsNotFound(err) {
+				return false, nil
+			}
+			if err != nil {
+				return false, errors.Wrap(err)
+			}
+			return true, nil
+		}),
+	)
 }
 
 func (s *ControllerManagerTestSuiteBase) AddPod(name string, podIp string, labels map[string]string, ownerRefs []metav1.OwnerReference) *corev1.Pod {
@@ -115,26 +128,76 @@ func (s *ControllerManagerTestSuiteBase) AddPod(name string, podIp string, label
 	err := s.Mgr.GetClient().Create(context.Background(), pod)
 	s.Require().NoError(err)
 
+	// Prevents race - UpdateStatus can alter the pod.
+	podCopy := pod.DeepCopy()
 	if podIp != "" {
 		pod.Status.PodIP = podIp
 		pod.Status.PodIPs = []corev1.PodIP{{IP: podIp}}
-		pod, err = s.K8sDirectClient.CoreV1().Pods(s.TestNamespace).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+		pod.Status.Phase = corev1.PodRunning
+		pod.Status.DeepCopyInto(&podCopy.Status)
+		_, err = s.K8sDirectClient.CoreV1().Pods(s.TestNamespace).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+		s.Require().NoError(err)
+	}
+	s.waitForObjectToBeCreated(pod)
+	return podCopy
+}
+
+func (s *ControllerManagerTestSuiteBase) AddPodWithHostNetwork(name, ip string, labels, annotations map[string]string, hostNetwork bool) *corev1.Pod {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Namespace:   s.TestNamespace,
+			Labels:      labels,
+			Annotations: annotations,
+		},
+		Spec: corev1.PodSpec{
+			HostNetwork: hostNetwork,
+			Containers: []corev1.Container{
+				{
+					Name:            name,
+					Image:           "nginx",
+					ImagePullPolicy: "Always",
+				},
+			},
+		},
+		Status: corev1.PodStatus{
+			PodIP: ip,
+			PodIPs: []corev1.PodIP{
+				{IP: ip},
+			},
+		},
+	}
+	s.Require().NoError(s.Mgr.GetClient().Create(context.Background(), pod))
+
+	// Prevents race - UpdateStatus can alter the pod.
+	podCopy := pod.DeepCopy()
+	if ip != "" {
+		pod.Status.PodIP = ip
+		pod.Status.PodIPs = []corev1.PodIP{{IP: ip}}
+		pod.Status.Phase = corev1.PodRunning
+		pod.Status.DeepCopyInto(&podCopy.Status)
+		_, err := s.K8sDirectClient.CoreV1().Pods(s.TestNamespace).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
 		s.Require().NoError(err)
 	}
 	s.waitForObjectToBeCreated(pod)
 	return pod
 }
 
-func (s *ControllerManagerTestSuiteBase) AddEndpoints(name string, podIps []string) *corev1.Endpoints {
-	addresses := lo.Map(podIps, func(ip string, _ int) corev1.EndpointAddress {
-		return corev1.EndpointAddress{IP: ip}
+func (s *ControllerManagerTestSuiteBase) AddEndpoints(name string, pods []*corev1.Pod, port *int) *corev1.Endpoints {
+	addresses := lo.Map(pods, func(pod *corev1.Pod, _ int) corev1.EndpointAddress {
+		return corev1.EndpointAddress{IP: pod.Status.PodIP, TargetRef: &corev1.ObjectReference{Kind: "Pod", Name: pod.Name, Namespace: pod.Namespace}}
 	})
 
+	endpointPort := 8080
+	if port != nil {
+		endpointPort = *port
+	}
 	endpoints := &corev1.Endpoints{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: s.TestNamespace},
-		Subsets:    []corev1.EndpointSubset{{Addresses: addresses, Ports: []corev1.EndpointPort{{Name: "someport", Port: 8080, Protocol: corev1.ProtocolTCP}}}},
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("svc-%s", name), Namespace: s.TestNamespace},
+		Subsets:    []corev1.EndpointSubset{{Addresses: addresses, Ports: []corev1.EndpointPort{{Name: "someport", Port: int32(endpointPort), Protocol: corev1.ProtocolTCP}}}},
 	}
 
+	s.Require().NotEmpty(addresses[0].IP)
 	err := s.Mgr.GetClient().Create(context.Background(), endpoints)
 	s.Require().NoError(err)
 
@@ -142,12 +205,22 @@ func (s *ControllerManagerTestSuiteBase) AddEndpoints(name string, podIps []stri
 	return endpoints
 }
 
-func (s *ControllerManagerTestSuiteBase) AddService(name string, podIps []string, selector map[string]string) *corev1.Service {
+func (s *ControllerManagerTestSuiteBase) AddClusterIPService(name string, selector map[string]string, serviceIp string, pods []*corev1.Pod) *corev1.Service {
+	return s.AddService(name, selector, serviceIp, pods, corev1.ServiceTypeClusterIP)
+}
+
+func (s *ControllerManagerTestSuiteBase) AddLoadBalancerService(name string, selector map[string]string, serviceIp string, pods []*corev1.Pod) *corev1.Service {
+	return s.AddService(name, selector, serviceIp, pods, corev1.ServiceTypeLoadBalancer)
+}
+
+func (s *ControllerManagerTestSuiteBase) AddService(name string, selector map[string]string, serviceIp string, pods []*corev1.Pod, serviceType corev1.ServiceType) *corev1.Service {
 	service := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: s.TestNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("svc-%s", name), Namespace: s.TestNamespace},
 		Spec: corev1.ServiceSpec{Selector: selector,
-			Ports: []corev1.ServicePort{{Name: "someport", Port: 8080, Protocol: corev1.ProtocolTCP}},
-			Type:  corev1.ServiceTypeClusterIP,
+			Ports:      []corev1.ServicePort{{Name: "someport", Port: 8080, Protocol: corev1.ProtocolTCP}},
+			Type:       serviceType,
+			ClusterIP:  serviceIp,
+			ClusterIPs: []string{serviceIp},
 		},
 	}
 	err := s.Mgr.GetClient().Create(context.Background(), service)
@@ -155,13 +228,103 @@ func (s *ControllerManagerTestSuiteBase) AddService(name string, podIps []string
 
 	s.waitForObjectToBeCreated(service)
 
-	s.AddEndpoints(name, podIps)
+	s.AddEndpoints(name, pods, nil)
 	return service
 }
 
-func (s *ControllerManagerTestSuiteBase) AddReplicaSet(name string, podIps []string, podLabels map[string]string) *appsv1.ReplicaSet {
+func (s *ControllerManagerTestSuiteBase) AddServiceWithIngress(name string, selector map[string]string, serviceIp string, externalIP string, pods []*corev1.Pod, port int) *corev1.Service {
+	serviceName := fmt.Sprintf("svc-%s", name)
+	status := corev1.ServiceStatus{
+		LoadBalancer: corev1.LoadBalancerStatus{
+			Ingress: []corev1.LoadBalancerIngress{{IP: externalIP}},
+		},
+	}
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: serviceName, Namespace: s.TestNamespace},
+		Spec: corev1.ServiceSpec{Selector: selector,
+			Ports:      []corev1.ServicePort{{Name: "someport", Port: int32(port), Protocol: corev1.ProtocolTCP}},
+			Type:       corev1.ServiceTypeLoadBalancer,
+			ClusterIP:  serviceIp,
+			ClusterIPs: []string{serviceIp},
+		},
+	}
+	err := s.Mgr.GetClient().Create(context.Background(), service)
+	s.Require().NoError(err)
+
+	service.Status = status
+	err = s.Mgr.GetClient().Status().Update(context.Background(), service)
+	s.Require().NoError(err)
+
+	s.waitForObjectToBeCreated(service)
+	s.AddIngress(name, serviceName, s.TestNamespace, externalIP, port)
+	s.AddEndpoints(name, pods, &port)
+	return service
+}
+
+func (s *ControllerManagerTestSuiteBase) AddIngress(name string, serviceName string, serviceNamespace, externalIP string, port int) *networkingv1.Ingress {
+	ingress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("ingress-%s", name), Namespace: s.TestNamespace},
+		Spec: networkingv1.IngressSpec{
+			Rules: []networkingv1.IngressRule{
+				{
+					Host: fmt.Sprintf("%s.%s.svc.cluster.local", serviceName, serviceNamespace),
+					IngressRuleValue: networkingv1.IngressRuleValue{
+						HTTP: &networkingv1.HTTPIngressRuleValue{
+							Paths: []networkingv1.HTTPIngressPath{
+								{
+									PathType: lo.ToPtr(networkingv1.PathTypeExact),
+									Path:     "/",
+									Backend: networkingv1.IngressBackend{
+										Service: &networkingv1.IngressServiceBackend{
+											Name: serviceName,
+											Port: networkingv1.ServiceBackendPort{
+												Number: int32(port),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Status: networkingv1.IngressStatus{
+			LoadBalancer: networkingv1.IngressLoadBalancerStatus{
+				Ingress: []networkingv1.IngressLoadBalancerIngress{{IP: externalIP}},
+			},
+		},
+	}
+
+	err := s.Mgr.GetClient().Create(context.Background(), ingress)
+	s.Require().NoError(err)
+
+	s.waitForObjectToBeCreated(ingress)
+	return ingress
+}
+func (s *ControllerManagerTestSuiteBase) GetAPIServerService() *corev1.Service {
+	service := &corev1.Service{}
+	s.Require().NoError(wait.PollUntilContextTimeout(context.Background(),
+		waitForCreationInterval,
+		waitForCreationTimeout,
+		true,
+		func(ctx context.Context) (done bool, err error) {
+			err = s.Mgr.GetClient().Get(ctx, types.NamespacedName{Name: "kubernetes", Namespace: "default"}, service)
+			if k8serrors.IsNotFound(err) {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			return true, nil
+		}),
+	)
+	return service
+}
+
+func (s *ControllerManagerTestSuiteBase) AddReplicaSet(name string, podIps []string, podLabels map[string]string) (*appsv1.ReplicaSet, []*corev1.Pod) {
 	replicaSet := &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: s.TestNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("replicaset-%s", name), Namespace: s.TestNamespace},
 		Spec: appsv1.ReplicaSetSpec{
 			Replicas: lo.ToPtr(int32(len(podIps))),
 			Selector: &metav1.LabelSelector{MatchLabels: podLabels},
@@ -183,8 +346,9 @@ func (s *ControllerManagerTestSuiteBase) AddReplicaSet(name string, podIps []str
 
 	s.waitForObjectToBeCreated(replicaSet)
 
+	pods := make([]*corev1.Pod, 0)
 	for i, ip := range podIps {
-		s.AddPod(fmt.Sprintf("%s-%d", name, i), ip, podLabels, []metav1.OwnerReference{
+		pod := s.AddPod(fmt.Sprintf("%s-%d", name, i), ip, podLabels, []metav1.OwnerReference{
 			{
 				APIVersion:         "apps/v1",
 				Kind:               "ReplicaSet",
@@ -194,14 +358,15 @@ func (s *ControllerManagerTestSuiteBase) AddReplicaSet(name string, podIps []str
 				UID:                replicaSet.UID,
 			},
 		})
+		pods = append(pods, pod)
 	}
 
-	return replicaSet
+	return replicaSet, pods
 }
 
-func (s *ControllerManagerTestSuiteBase) AddDeployment(name string, podIps []string, podLabels map[string]string) *appsv1.Deployment {
+func (s *ControllerManagerTestSuiteBase) AddDeployment(name string, podIps []string, podLabels map[string]string) (*appsv1.Deployment, []*corev1.Pod) {
 	deployment := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: s.TestNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("deployment-%s", name), Namespace: s.TestNamespace},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: lo.ToPtr(int32(len(podIps))),
 			Selector: &metav1.LabelSelector{MatchLabels: podLabels},
@@ -223,7 +388,7 @@ func (s *ControllerManagerTestSuiteBase) AddDeployment(name string, podIps []str
 
 	s.waitForObjectToBeCreated(deployment)
 
-	replicaSet := s.AddReplicaSet(name, podIps, podLabels)
+	replicaSet, pods := s.AddReplicaSet(name, podIps, podLabels)
 	replicaSet.ObjectMeta.OwnerReferences = []metav1.OwnerReference{
 		{
 			APIVersion:         "apps/v1",
@@ -237,18 +402,24 @@ func (s *ControllerManagerTestSuiteBase) AddDeployment(name string, podIps []str
 	err = s.Mgr.GetClient().Update(context.Background(), replicaSet)
 	s.Require().NoError(err)
 
-	return deployment
+	return deployment, pods
 }
 
-func (s *ControllerManagerTestSuiteBase) AddDeploymentWithService(name string, podIps []string, podLabels map[string]string) (*appsv1.Deployment, *corev1.Service) {
-	deployment := s.AddDeployment(name, podIps, podLabels)
-	service := s.AddService(name, podIps, podLabels)
-	return deployment, service
+func (s *ControllerManagerTestSuiteBase) AddDeploymentWithService(name string, podIps []string, podLabels map[string]string, serviceIp string) (*appsv1.Deployment, *corev1.Service, []*corev1.Pod) {
+	deployment, pods := s.AddDeployment(name, podIps, podLabels)
+	service := s.AddClusterIPService(name, podLabels, serviceIp, pods)
+	return deployment, service, pods
 }
 
-func (s *ControllerManagerTestSuiteBase) AddDaemonSet(name string, podIps []string, podLabels map[string]string) *appsv1.DaemonSet {
+func (s *ControllerManagerTestSuiteBase) AddDeploymentWithIngressService(name string, podIps []string, podLabels map[string]string, serviceIp string, externalIP string, port int) (*appsv1.Deployment, *corev1.Service, []*corev1.Pod) {
+	deployment, pods := s.AddDeployment(name, podIps, podLabels)
+	service := s.AddServiceWithIngress(name, podLabels, serviceIp, externalIP, pods, port)
+	return deployment, service, pods
+}
+
+func (s *ControllerManagerTestSuiteBase) AddDaemonSet(name string, podIps []string, podLabels map[string]string) (*appsv1.DaemonSet, []*corev1.Pod) {
 	daemonSet := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: s.TestNamespace},
+		ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("daemonset-%s", name), Namespace: s.TestNamespace},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: podLabels},
 			Template: corev1.PodTemplateSpec{
@@ -269,8 +440,9 @@ func (s *ControllerManagerTestSuiteBase) AddDaemonSet(name string, podIps []stri
 
 	s.waitForObjectToBeCreated(daemonSet)
 
+	pods := make([]*corev1.Pod, 0)
 	for i, ip := range podIps {
-		s.AddPod(fmt.Sprintf("%s-%d", name, i), ip, podLabels, []metav1.OwnerReference{
+		pod := s.AddPod(fmt.Sprintf("%s-%d", name, i), ip, podLabels, []metav1.OwnerReference{
 			{
 				APIVersion:         "apps/v1",
 				Kind:               "DaemonSet",
@@ -280,13 +452,14 @@ func (s *ControllerManagerTestSuiteBase) AddDaemonSet(name string, podIps []stri
 				UID:                daemonSet.UID,
 			},
 		})
+		pods = append(pods, pod)
 	}
 
-	return daemonSet
+	return daemonSet, pods
 }
 
-func (s *ControllerManagerTestSuiteBase) AddDaemonSetWithService(name string, podIps []string, podLabels map[string]string) (*appsv1.DaemonSet, *corev1.Service) {
-	daemonSet := s.AddDaemonSet(name, podIps, podLabels)
-	service := s.AddService(name, podIps, podLabels)
+func (s *ControllerManagerTestSuiteBase) AddDaemonSetWithService(name string, podIps []string, podLabels map[string]string, serviceIp string) (*appsv1.DaemonSet, *corev1.Service) {
+	daemonSet, pods := s.AddDaemonSet(name, podIps, podLabels)
+	service := s.AddClusterIPService(name, podLabels, serviceIp, pods)
 	return daemonSet, service
 }

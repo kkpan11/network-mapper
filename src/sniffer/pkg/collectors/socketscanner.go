@@ -3,7 +3,11 @@ package collectors
 import (
 	"fmt"
 	"github.com/otterize/go-procnet/procnet"
+	sharedconfig "github.com/otterize/network-mapper/src/shared/config"
 	"github.com/otterize/network-mapper/src/sniffer/pkg/utils"
+	"github.com/otterize/nilable"
+	"github.com/samber/lo"
+	"github.com/spf13/viper"
 
 	"time"
 )
@@ -21,6 +25,9 @@ func NewSocketScanner() *SocketScanner {
 }
 
 func (s *SocketScanner) scanTcpFile(hostname string, path string) {
+	if !viper.GetBool(sharedconfig.EnableSocketScannerKey) {
+		return
+	}
 	socks, err := procnet.SocksFromPath(path)
 	if err != nil {
 		// it's likely that some files will be deleted during our iteration, so we ignore errors reading the file.
@@ -43,11 +50,10 @@ func (s *SocketScanner) scanTcpFile(hostname string, path string) {
 			continue
 		}
 
-		if _, ok := listenPorts[sock.LocalAddr.Port]; ok {
-			// FIXME: don't check hostname since we have the server's hostname and the client's IP here. Consider reversing direction to reporting from the client's point-of-view,
-			// but this requires being able to resolve service IPs
-			// For example, Remote: 10.244.120.96 (loadgenerator) -> Local: 10.244.120.95 (frontend). The hostname we have is frontend (local), but the client we are attempting to report is loadgenerator.
-			s.addCapturedRequest(sock.RemoteAddr.IP.String(), "", sock.LocalAddr.IP.String(), time.Now())
+		// Only report sockets from the client-side by checking if the local port for this socket is the same port as a listen socket.
+		if _, isServersideSocket := listenPorts[sock.LocalAddr.Port]; !isServersideSocket {
+			// The hostname we have here is the hostname for the client.
+			s.addCapturedRequest(sock.LocalAddr.IP.String(), hostname, sock.RemoteAddr.IP.String(), sock.RemoteAddr.IP.String(), time.Now(), nilable.Nilable[int]{}, lo.ToPtr(int(sock.LocalAddr.Port)))
 		}
 	}
 }
