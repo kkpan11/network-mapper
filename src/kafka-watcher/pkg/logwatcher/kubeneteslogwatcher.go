@@ -3,9 +3,9 @@ package logwatcher
 import (
 	"bufio"
 	"context"
-	"errors"
+	"github.com/otterize/intents-operator/src/shared/errors"
 	"github.com/otterize/network-mapper/src/kafka-watcher/pkg/config"
-	"github.com/otterize/network-mapper/src/kafka-watcher/pkg/mapperclient"
+	"github.com/otterize/network-mapper/src/mapperclient"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 	"golang.org/x/exp/slices"
@@ -28,24 +28,24 @@ type KubernetesLogWatcher struct {
 	kafkaServers []types.NamespacedName
 }
 
-func NewKubernetesLogWatcher(mapperClient mapperclient.MapperClient, kafkaServers []types.NamespacedName) (*KubernetesLogWatcher, error) {
+func NewKubernetesLogWatcher(mapperClient *mapperclient.Client, kafkaServers []types.NamespacedName) (*KubernetesLogWatcher, error) {
 	conf, err := rest.InClusterConfig()
 
 	if err != nil && !errors.Is(err, rest.ErrNotInCluster) {
-		return nil, err
+		return nil, errors.Wrap(err)
 	}
 
 	// We try building the REST Config from ./kube/config to support running the watcher locally
 	if conf == nil {
 		conf, err = clientcmd.BuildConfigFromFlags("", filepath.Join(homedir.HomeDir(), ".kube", "config"))
 		if err != nil {
-			return nil, err
+			return nil, errors.Wrap(err)
 		}
 	}
 
 	cs, err := kubernetes.NewForConfig(conf)
 	if err != nil {
-		return nil, err
+		return nil, errors.Wrap(err)
 	}
 
 	w := &KubernetesLogWatcher{
@@ -65,7 +65,7 @@ func (w *KubernetesLogWatcher) RunForever(ctx context.Context) error {
 	err := w.validateKafkaServers(ctx)
 
 	if err != nil {
-		return err
+		return errors.Wrap(err)
 	}
 
 	for _, kafkaServer := range w.kafkaServers {
@@ -73,7 +73,7 @@ func (w *KubernetesLogWatcher) RunForever(ctx context.Context) error {
 	}
 
 	for {
-		time.Sleep(viper.GetDuration(config.KafkaCooldownIntervalKey))
+		time.Sleep(viper.GetDuration(config.KafkaReportIntervalKey))
 		if err := w.reportResults(ctx); err != nil {
 			logrus.WithError(err).Errorf("Failed reporting watcher results to mapper")
 		}
@@ -81,6 +81,14 @@ func (w *KubernetesLogWatcher) RunForever(ctx context.Context) error {
 }
 
 func (w *KubernetesLogWatcher) watchOnce(ctx context.Context, kafkaServer types.NamespacedName, startTime time.Time) error {
+	pod, err := w.clientset.CoreV1().Pods(kafkaServer.Namespace).Get(ctx, kafkaServer.Name, metav1.GetOptions{})
+	if err != nil {
+		return errors.Wrap(err)
+	}
+	if pod.Status.Phase != corev1.PodRunning {
+		logrus.Debugf("Kafka server %s is not running, skipping logs for this iteration", kafkaServer.String())
+		return nil
+	}
 	podLogOpts := corev1.PodLogOptions{
 		SinceTime: &metav1.Time{Time: startTime},
 	}
@@ -89,7 +97,7 @@ func (w *KubernetesLogWatcher) watchOnce(ctx context.Context, kafkaServer types.
 	req := w.clientset.CoreV1().Pods(kafkaServer.Namespace).GetLogs(kafkaServer.Name, &podLogOpts)
 	reader, err := req.Stream(ctxTimeout)
 	if err != nil {
-		return err
+		return errors.Wrap(err)
 	}
 
 	defer reader.Close()

@@ -3,9 +3,38 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/google/uuid"
+	"github.com/bombsimon/logrusr/v3"
+	"github.com/labstack/echo-contrib/echoprometheus"
+	otterizev2alpha1 "github.com/otterize/intents-operator/src/operator/api/v2alpha1"
+	"github.com/otterize/intents-operator/src/shared"
+	"github.com/otterize/intents-operator/src/shared/clusterutils"
+	"github.com/otterize/intents-operator/src/shared/errors"
+	"github.com/otterize/intents-operator/src/shared/telemetries/componentinfo"
+	"github.com/otterize/intents-operator/src/shared/telemetries/errorreporter"
+	istiowatcher "github.com/otterize/network-mapper/src/istio-watcher/pkg/watcher"
+	"github.com/otterize/network-mapper/src/mapper/pkg/awsintentsholder"
+	"github.com/otterize/network-mapper/src/mapper/pkg/azureintentsholder"
+	"github.com/otterize/network-mapper/src/mapper/pkg/dnscache"
+	"github.com/otterize/network-mapper/src/mapper/pkg/dnsintentspublisher"
+	"github.com/otterize/network-mapper/src/mapper/pkg/externaltrafficholder"
+	"github.com/otterize/network-mapper/src/mapper/pkg/incomingtrafficholder"
+	"github.com/otterize/network-mapper/src/mapper/pkg/resourcevisibility"
+	"github.com/otterize/network-mapper/src/shared/echologrus"
+	"golang.org/x/sync/errgroup"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"net/http"
+	"os"
+	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"time"
+
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
+	otterizev1alpha2 "github.com/otterize/intents-operator/src/operator/api/v1alpha2"
+	otterizev1alpha3 "github.com/otterize/intents-operator/src/operator/api/v1alpha3"
+	otterizev1beta1 "github.com/otterize/intents-operator/src/operator/api/v1beta1"
+	otterizev2beta1 "github.com/otterize/intents-operator/src/operator/api/v2beta1"
 	"github.com/otterize/intents-operator/src/shared/serviceidresolver"
 	"github.com/otterize/intents-operator/src/shared/telemetries/telemetriesgql"
 	"github.com/otterize/intents-operator/src/shared/telemetries/telemetrysender"
@@ -14,24 +43,32 @@ import (
 	"github.com/otterize/network-mapper/src/mapper/pkg/config"
 	"github.com/otterize/network-mapper/src/mapper/pkg/intentsstore"
 	"github.com/otterize/network-mapper/src/mapper/pkg/kubefinder"
+	"github.com/otterize/network-mapper/src/mapper/pkg/metricexporter"
 	"github.com/otterize/network-mapper/src/mapper/pkg/resolvers"
 	sharedconfig "github.com/otterize/network-mapper/src/shared/config"
 	"github.com/otterize/network-mapper/src/shared/kubeutils"
 	"github.com/otterize/network-mapper/src/shared/version"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/metadata"
-	"net/http"
-	"os"
-	"os/signal"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	clientconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
-	"syscall"
-	"time"
 )
+
+var (
+	scheme = runtime.NewScheme()
+)
+
+func init() {
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(otterizev1alpha2.AddToScheme(scheme))
+	utilruntime.Must(otterizev1alpha3.AddToScheme(scheme))
+	utilruntime.Must(otterizev1beta1.AddToScheme(scheme))
+	utilruntime.Must(otterizev2alpha1.AddToScheme(scheme))
+	utilruntime.Must(otterizev2beta1.AddToScheme(scheme))
+}
 
 func getClusterDomainOrDefault() string {
 	resolvedClusterDomain, err := kubeutils.GetClusterDomain()
@@ -45,92 +82,236 @@ func getClusterDomainOrDefault() string {
 }
 
 func main() {
+	logrus.SetLevel(logrus.InfoLevel)
 	if viper.GetBool(sharedconfig.DebugKey) {
 		logrus.SetLevel(logrus.DebugLevel)
 	}
+	logrus.SetFormatter(&logrus.JSONFormatter{
+		TimestampFormat: time.RFC3339,
+	})
+	signalHandlerCtx := ctrl.SetupSignalHandler()
+
+	clusterUID := clusterutils.GetOrCreateClusterUID(signalHandlerCtx)
+
+	componentinfo.SetGlobalContextId(telemetrysender.Anonymize(clusterUID))
+
+	errorreporter.Init(telemetriesgql.TelemetryComponentTypeNetworkMapper, version.Version())
+	defer errorreporter.AutoNotify()
+	shared.RegisterPanicHandlers()
 
 	if !viper.IsSet(config.ClusterDomainKey) || viper.GetString(config.ClusterDomainKey) == "" {
 		clusterDomain := getClusterDomainOrDefault()
 		viper.Set(config.ClusterDomainKey, clusterDomain)
 	}
 
+	ctrl.SetLogger(logrusr.New(logrus.StandardLogger()))
+	echologrus.Logger = logrus.StandardLogger()
+
 	// start manager with operators
-	mgr, err := manager.New(clientconfig.GetConfigOrDie(), manager.Options{MetricsBindAddress: "0"})
+	options := manager.Options{
+		Scheme: scheme,
+		Metrics: server.Options{
+			BindAddress: "0",
+		},
+	}
+	mgr, err := manager.New(clientconfig.GetConfigOrDie(), options)
 	if err != nil {
-		logrus.Errorf("unable to set up overall controller manager: %s", err)
-		os.Exit(1)
+		logrus.Panicf("unable to set up overall controller manager: %s", err)
 	}
 
-	kubeFinder, err := kubefinder.NewKubeFinder(mgr)
+	errgrp, errGroupCtx := errgroup.WithContext(signalHandlerCtx)
+
+	dnsCache := dnscache.NewDNSCache()
+	dnsPublisher, dnsPublisherEnabled, err := dnsintentspublisher.InitWithManager(errGroupCtx, mgr, dnsCache)
+	if err != nil {
+		logrus.WithError(err).Panic("Failed to initialize DNS publisher")
+	}
+
+	mapperServer := echo.New()
+	mapperServer.HideBanner = true
+
+	kubeFinder, err := kubefinder.NewKubeFinder(errGroupCtx, mgr)
 	if err != nil {
 		logrus.Error(err)
 		os.Exit(1)
 	}
 
-	go func() {
+	errgrp.Go(func() error {
+		defer errorreporter.AutoNotify()
+
 		logrus.Info("Starting operator manager")
-		if err := mgr.Start(signals.SetupSignalHandler()); err != nil {
-			logrus.Error(err, "unable to run manager")
-			os.Exit(1)
 
+		if err := mgr.Start(errGroupCtx); err != nil {
+			logrus.WithError(err).Error("unable to run manager")
+			return errors.Wrap(err)
 		}
-	}()
 
-	metadataClient, err := metadata.NewForConfig(clientconfig.GetConfigOrDie())
-	if err != nil {
-		logrus.WithError(err).Fatal("unable to create metadata client")
-	}
-	mapping, err := mgr.GetRESTMapper().RESTMapping(schema.GroupKind{Group: "", Kind: "Namespace"}, "v1")
-	if err != nil {
-		logrus.WithError(err).Fatal("unable to create Kubernetes API REST mapping")
-	}
-	kubeSystemUID := ""
-	kubeSystemNs, err := metadataClient.Resource(mapping.Resource).Get(context.Background(), "kube-system", metav1.GetOptions{})
-	if err != nil || kubeSystemNs == nil {
-		logrus.Warningf("failed getting kubesystem UID: %s", err)
-		kubeSystemUID = fmt.Sprintf("rand-%s", uuid.New().String())
-	} else {
-		kubeSystemUID = string(kubeSystemNs.UID)
-	}
-	telemetrysender.SetGlobalContextId(telemetrysender.Anonymize(kubeSystemUID))
+		return nil
+	})
 
 	// start API server
-	e := echo.New()
-	e.GET("/healthz", func(c echo.Context) error {
+	mapperServer.GET("/healthz", func(c echo.Context) error {
 		return c.NoContent(http.StatusOK)
 	})
-	e.Use(middleware.Logger())
-	e.Use(middleware.CORS())
-	e.Use(middleware.RemoveTrailingSlash())
+	mapperServer.Logger = echologrus.GetEchoLogger()
+	mapperServer.Use(echologrus.Hook())
+	mapperServer.Use(middleware.CORS())
+	mapperServer.Use(middleware.RemoveTrailingSlash())
 	initCtx, cancelFn := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelFn()
 	mgr.GetCache().WaitForCacheSync(initCtx) // needed to let the manager initialize before used in intentsHolder
 
 	intentsHolder := intentsstore.NewIntentsHolder()
+	externalTrafficIntentsHolder := externaltrafficholder.NewExternalTrafficIntentsHolder()
+	incomingTrafficIntentsHolder := incomingtrafficholder.NewIncomingTrafficIntentsHolder()
+	awsIntentsHolder := awsintentsholder.New()
+	azureIntentsHolder := azureintentsholder.New()
 
-	resolver := resolvers.NewResolver(kubeFinder, serviceidresolver.NewResolver(mgr.GetClient()), intentsHolder)
-	resolver.Register(e)
+	resolver := resolvers.NewResolver(
+		kubeFinder,
+		serviceidresolver.NewResolver(mgr.GetClient()),
+		intentsHolder,
+		externalTrafficIntentsHolder,
+		awsIntentsHolder,
+		azureIntentsHolder,
+		dnsCache,
+		incomingTrafficIntentsHolder,
+	)
+	resolver.Register(mapperServer)
 
-	cloudClientCtx, cloudClientCancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cloudClientCancel()
-	cloudClient, cloudEnabled, err := cloudclient.NewClient(cloudClientCtx)
+	metricsServer := echo.New()
+	metricsServer.HideBanner = true
+	metricsServer.GET("/metrics", echoprometheus.NewHandler())
+
+	cloudClient, cloudEnabled, err := cloudclient.NewClient(errGroupCtx)
 	if err != nil {
-		logrus.WithError(err).Fatal("Failed to initialize cloud client")
+		logrus.WithError(err).Panic("Failed to initialize cloud client")
 	}
+
+	if viper.GetBool(config.EnableIstioCollectionKey) {
+		istioWatcher, err := istiowatcher.NewWatcher(resolver.Mutation())
+		if err != nil {
+			logrus.WithError(err).Panic("failed to initialize istio watcher")
+		}
+
+		errgrp.Go(func() error {
+			defer errorreporter.AutoNotify()
+			return istioWatcher.RunForever(errGroupCtx)
+		})
+	}
+
+	cloudUploaderConfig := clouduploader.ConfigFromViper()
 	if cloudEnabled {
-		cloudUploaderConfig := clouduploader.ConfigFromViper()
 		cloudUploader := clouduploader.NewCloudUploader(intentsHolder, cloudUploaderConfig, cloudClient)
-		go cloudUploader.PeriodicIntentsUpload(cloudClientCtx)
-		go cloudUploader.PeriodicStatusReport(cloudClientCtx)
+
+		intentsHolder.RegisterNotifyIntents(cloudUploader.NotifyIntents)
+		if viper.GetBool(config.ExternalTrafficCaptureEnabledKey) {
+			externalTrafficIntentsHolder.RegisterNotifyIntents(cloudUploader.NotifyExternalTrafficIntents)
+			incomingTrafficIntentsHolder.RegisterNotifyIntents(cloudUploader.NotifyIncomingTrafficIntents)
+		}
+		awsIntentsHolder.RegisterNotifyIntents(cloudUploader.NotifyAWSIntents)
+		azureIntentsHolder.RegisterNotifyIntents(cloudUploader.NotifyAzureIntents)
+
+		go cloudUploader.PeriodicStatusReport(errGroupCtx)
+
+		ingressReconciler := resourcevisibility.NewIngressReconciler(mgr.GetClient(), cloudClient)
+		if err := ingressReconciler.SetupWithManager(mgr); err != nil {
+			logrus.WithError(err).Panic("unable to create ingress reconciler")
+		}
+
+		serviceReconciler := resourcevisibility.NewServiceReconciler(mgr.GetClient(), cloudClient, kubeFinder)
+		if err := serviceReconciler.SetupWithManager(mgr); err != nil {
+			logrus.WithError(err).Panic("unable to create service reconciler")
+		}
 	}
 
-	telemetrysender.SetGlobalVersion(version.Version())
+	if viper.GetBool(config.OTelEnabledKey) {
+		otelExporter, err := metricexporter.NewMetricExporter(errGroupCtx)
+		if err != nil {
+			logrus.WithError(err).Panic("Failed to initialize otel exporter")
+		}
+		intentsHolder.RegisterNotifyIntents(otelExporter.NotifyIntents)
+	}
+
+	if dnsPublisherEnabled {
+		errgrp.Go(func() error {
+			defer errorreporter.AutoNotify()
+			dnsPublisher.RunForever(errGroupCtx)
+			return nil
+		})
+	}
+
+	errgrp.Go(func() error {
+		defer errorreporter.AutoNotify()
+		intentsHolder.PeriodicIntentsUpload(errGroupCtx, cloudUploaderConfig.UploadInterval)
+		return nil
+	})
+
+	if viper.GetBool(config.ExternalTrafficCaptureEnabledKey) {
+		errgrp.Go(func() error {
+			defer errorreporter.AutoNotify()
+			externalTrafficIntentsHolder.PeriodicIntentsUpload(errGroupCtx, cloudUploaderConfig.UploadInterval)
+			return nil
+		})
+		errgrp.Go(func() error {
+			defer errorreporter.AutoNotify()
+			logrus.Info("Starting incoming traffic intents uploader")
+			incomingTrafficIntentsHolder.PeriodicIntentsUpload(errGroupCtx, cloudUploaderConfig.UploadInterval)
+			return nil
+		})
+	}
+
+	errgrp.Go(func() error {
+		defer errorreporter.AutoNotify()
+		awsIntentsHolder.PeriodicIntentsUpload(errGroupCtx, cloudUploaderConfig.UploadInterval)
+		return nil
+	})
+	errgrp.Go(func() error {
+		defer errorreporter.AutoNotify()
+		azureIntentsHolder.PeriodicIntentsUpload(errGroupCtx, cloudUploaderConfig.UploadInterval)
+		return nil
+	})
+
 	telemetrysender.SendNetworkMapper(telemetriesgql.EventTypeStarted, 1)
-	logrus.Info("Starting api server")
-	err = e.Start("0.0.0.0:9090")
-	if err != nil {
-		logrus.Error(err)
-		os.Exit(1)
-	}
+	telemetrysender.NetworkMapperRunActiveReporter(errGroupCtx)
 
+	errgrp.Go(func() error {
+		defer errorreporter.AutoNotify()
+		go shutdownGracefullyOnCancel(errGroupCtx, metricsServer)
+
+		return metricsServer.Start(fmt.Sprintf(":%d", viper.GetInt(sharedconfig.PrometheusMetricsPortKey)))
+	})
+	errgrp.Go(func() error {
+		defer errorreporter.AutoNotify()
+		go shutdownGracefullyOnCancel(errGroupCtx, mapperServer)
+
+		return mapperServer.Start(":9090")
+	})
+	errgrp.Go(func() error {
+		defer errorreporter.AutoNotify()
+		return resolver.RunForever(errGroupCtx)
+	})
+
+	err = errgrp.Wait()
+	logrus.Infof("Network Mapper stopped")
+
+	if err != nil {
+		if !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, context.Canceled) {
+			logrus.WithError(err).Fatal("failed to shutdown server")
+		}
+	}
+}
+
+func shutdownGracefullyOnCancel(errGroupCtx context.Context, server *echo.Echo) {
+	<-errGroupCtx.Done()
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	shutdownErr := server.Shutdown(timeoutCtx)
+
+	if shutdownErr != nil {
+		logrus.WithError(shutdownErr).Error("failed to shutdown server")
+		_ = server.Close()
+
+	}
 }

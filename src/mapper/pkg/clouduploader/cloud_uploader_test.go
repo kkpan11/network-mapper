@@ -3,7 +3,10 @@ package clouduploader
 import (
 	"context"
 	"errors"
-	"github.com/golang/mock/gomock"
+	"github.com/otterize/network-mapper/src/mapper/pkg/incomingtrafficholder"
+	"testing"
+	"time"
+
 	"github.com/otterize/network-mapper/src/mapper/pkg/cloudclient"
 	cloudclientmocks "github.com/otterize/network-mapper/src/mapper/pkg/cloudclient/mocks"
 	"github.com/otterize/network-mapper/src/mapper/pkg/config"
@@ -11,8 +14,7 @@ import (
 	"github.com/otterize/network-mapper/src/mapper/pkg/intentsstore"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/suite"
-	"testing"
-	"time"
+	"go.uber.org/mock/gomock"
 )
 
 var (
@@ -21,15 +23,17 @@ var (
 
 type CloudUploaderTestSuite struct {
 	suite.Suite
-	testNamespace string
-	intentsHolder *intentsstore.IntentsHolder
-	cloudUploader *CloudUploader
-	clientMock    *cloudclientmocks.MockCloudClient
+	testNamespace  string
+	intentsHolder  *intentsstore.IntentsHolder
+	incomingHolder *incomingtrafficholder.IncomingTrafficIntentsHolder
+	cloudUploader  *CloudUploader
+	clientMock     *cloudclientmocks.MockCloudClient
 }
 
 func (s *CloudUploaderTestSuite) SetupTest() {
 	s.testNamespace = "test-namespace"
 	s.intentsHolder = intentsstore.NewIntentsHolder()
+	s.incomingHolder = incomingtrafficholder.NewIncomingTrafficIntentsHolder()
 }
 
 func (s *CloudUploaderTestSuite) BeforeTest(_, testName string) {
@@ -61,6 +65,8 @@ func intentInput(clientName string, namespace string, serverName string, serverN
 		ServerName:      nilIfEmpty(serverName),
 		Namespace:       nilIfEmpty(namespace),
 		ServerNamespace: nilIfEmpty(serverNamespace),
+		Topics:          []*cloudclient.KafkaConfigInput{},
+		Resources:       []*cloudclient.HTTPConfigInput{},
 	}
 }
 
@@ -75,7 +81,7 @@ func (s *CloudUploaderTestSuite) TestUploadIntents() {
 
 	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), GetMatcher(intents1)).Return(nil).Times(1)
 
-	s.cloudUploader.uploadDiscoveredIntents(context.Background())
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
 
 	s.addIntent("client2", s.testNamespace, "server1", s.testNamespace)
 
@@ -85,7 +91,115 @@ func (s *CloudUploaderTestSuite) TestUploadIntents() {
 
 	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), GetMatcher(intents2)).Return(nil).Times(1)
 
-	s.cloudUploader.uploadDiscoveredIntents(context.Background())
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
+}
+
+func (s *CloudUploaderTestSuite) TestUploadIncomingTrafficIntents() {
+	sourceIP := "34.13.0.22"
+	incomingIntent := incomingtrafficholder.IncomingTrafficIntent{
+		Server:   model.OtterizeServiceIdentity{Name: "server1", Namespace: s.testNamespace},
+		LastSeen: testTimestamp,
+		IP:       sourceIP,
+	}
+	s.incomingHolder.AddIntent(incomingIntent)
+
+	intents1 := []cloudclient.IncomingTrafficDiscoveredIntentInput{
+		{
+			DiscoveredAt: testTimestamp,
+			Intent: cloudclient.IncomingTrafficIntentInput{
+				ServerName: "server1",
+				Namespace:  s.testNamespace,
+				Source: cloudclient.IncomingInternetSourceInput{
+					Ip: sourceIP,
+				},
+			},
+		},
+	}
+
+	s.clientMock.EXPECT().ReportIncomingTrafficDiscoveredIntents(gomock.Any(), intents1).Return(nil).Times(1)
+
+	s.cloudUploader.NotifyIncomingTrafficIntents(context.Background(), s.incomingHolder.GetNewIntentsSinceLastGet())
+
+	// Expect no new intents to be uploaded
+	s.cloudUploader.NotifyIncomingTrafficIntents(context.Background(), s.incomingHolder.GetNewIntentsSinceLastGet())
+}
+
+func (s *CloudUploaderTestSuite) TestUploadIntentsWithOperations() {
+	discoveredProduce := model.Intent{
+		Client: &model.OtterizeServiceIdentity{Name: "client1", Namespace: s.testNamespace},
+		Server: &model.OtterizeServiceIdentity{Name: "server1", Namespace: s.testNamespace},
+		Type:   lo.ToPtr(model.IntentTypeKafka),
+		KafkaTopics: []model.KafkaConfig{
+			{
+				Name:       "my-topic",
+				Operations: []model.KafkaOperation{model.KafkaOperationProduce},
+			},
+		},
+	}
+
+	s.intentsHolder.AddIntent(testTimestamp, discoveredProduce)
+
+	discoveredConsume := model.Intent{
+		Client: &model.OtterizeServiceIdentity{Name: "client1", Namespace: s.testNamespace},
+		Server: &model.OtterizeServiceIdentity{Name: "server1", Namespace: s.testNamespace},
+		Type:   lo.ToPtr(model.IntentTypeKafka),
+		KafkaTopics: []model.KafkaConfig{
+			{
+				Name:       "my-topic",
+				Operations: []model.KafkaOperation{model.KafkaOperationConsume},
+			},
+		},
+		HTTPResources: []model.HTTPResource{},
+	}
+
+	s.intentsHolder.AddIntent(testTimestamp, discoveredConsume)
+	cloudIntent := []cloudclient.IntentInput{
+		{
+			ClientName:      lo.ToPtr("client1"),
+			ServerName:      lo.ToPtr("server1"),
+			Namespace:       lo.ToPtr(s.testNamespace),
+			ServerNamespace: lo.ToPtr(s.testNamespace),
+			Type:            lo.ToPtr(cloudclient.IntentTypeKafka),
+			Topics: []*cloudclient.KafkaConfigInput{
+				{
+					Name: lo.ToPtr("my-topic"),
+					Operations: []*cloudclient.KafkaOperation{
+						lo.ToPtr(cloudclient.KafkaOperationConsume),
+						lo.ToPtr(cloudclient.KafkaOperationProduce),
+					},
+				},
+			},
+			Resources: []*cloudclient.HTTPConfigInput{},
+		},
+	}
+	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), GetMatcher(cloudIntent)).Return(nil).Times(1)
+
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
+
+	newTimestamp := testTimestamp.Add(time.Hour)
+	s.intentsHolder.AddIntent(newTimestamp, discoveredProduce)
+
+	produceOnly := []cloudclient.IntentInput{
+		{
+			ClientName:      lo.ToPtr("client1"),
+			ServerName:      lo.ToPtr("server1"),
+			Namespace:       lo.ToPtr(s.testNamespace),
+			ServerNamespace: lo.ToPtr(s.testNamespace),
+			Type:            lo.ToPtr(cloudclient.IntentTypeKafka),
+			Topics: []*cloudclient.KafkaConfigInput{
+				{
+					Name: lo.ToPtr("my-topic"),
+					Operations: []*cloudclient.KafkaOperation{
+						lo.ToPtr(cloudclient.KafkaOperationProduce),
+					},
+				},
+			},
+			Resources: []*cloudclient.HTTPConfigInput{},
+		},
+	}
+	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), GetMatcher(produceOnly)).Return(nil).Times(1)
+
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
 }
 
 func (s *CloudUploaderTestSuite) TestUploadIntentsInBatches() {
@@ -102,13 +216,13 @@ func (s *CloudUploaderTestSuite) TestUploadIntentsInBatches() {
 	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), GetMatcher([]cloudclient.IntentInput{intents1[0]})).Return(nil).Times(1)
 	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), GetMatcher([]cloudclient.IntentInput{intents1[1]})).Return(nil).Times(1)
 
-	s.cloudUploader.uploadDiscoveredIntents(context.Background())
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
 }
 
 func (s *CloudUploaderTestSuite) TestDontUploadWithoutIntents() {
 	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), gomock.Any()).Times(0)
 
-	s.cloudUploader.uploadDiscoveredIntents(context.Background())
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
 }
 
 func (s *CloudUploaderTestSuite) TestUploadSameIntentOnce() {
@@ -120,11 +234,11 @@ func (s *CloudUploaderTestSuite) TestUploadSameIntentOnce() {
 
 	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), GetMatcher(intents)).Return(nil).Times(1)
 
-	s.cloudUploader.uploadDiscoveredIntents(context.Background())
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
 
 	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), GetMatcher(intents)).Return(nil).Times(1)
 	s.addIntent("client", s.testNamespace, "server", s.testNamespace)
-	s.cloudUploader.uploadDiscoveredIntents(context.Background())
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
 }
 
 func (s *CloudUploaderTestSuite) TestRetryOnFailed() {
@@ -138,7 +252,7 @@ func (s *CloudUploaderTestSuite) TestRetryOnFailed() {
 
 	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), GetMatcher(intents)).Return(nil).Times(1)
 
-	s.cloudUploader.uploadDiscoveredIntents(context.Background())
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
 }
 
 func (s *CloudUploaderTestSuite) TestDontUploadWhenNothingNew() {
@@ -150,8 +264,8 @@ func (s *CloudUploaderTestSuite) TestDontUploadWhenNothingNew() {
 
 	s.clientMock.EXPECT().ReportDiscoveredIntents(gomock.Any(), GetMatcher(intents)).Return(nil).Times(1)
 
-	s.cloudUploader.uploadDiscoveredIntents(context.Background())
-	s.cloudUploader.uploadDiscoveredIntents(context.Background())
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
+	s.cloudUploader.NotifyIntents(context.Background(), s.intentsHolder.GetNewIntentsSinceLastGet())
 }
 
 func (s *CloudUploaderTestSuite) TestReportMapperComponent() {

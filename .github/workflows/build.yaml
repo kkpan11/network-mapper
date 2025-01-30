@@ -29,7 +29,6 @@ jobs:
           - mapper
           - sniffer
           - kafka-watcher
-          - istio-watcher
 
     steps:
       - id: registry
@@ -71,7 +70,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            "VERSION=${{ github.run_id }}"
+            "VERSION=0.0.${{ github.run_id }}"
 
   e2e-test:
     uses: ./.github/workflows/e2e-test.yaml
@@ -92,7 +91,7 @@ jobs:
   tag-latest:
     name: Tag latest
     if: github.ref == 'refs/heads/main'
-    needs: build
+    needs: e2e-test
     runs-on: ubuntu-latest
 
     steps:
@@ -114,4 +113,3 @@ jobs:
           retag_image_as_latest mapper
           retag_image_as_latest sniffer
           retag_image_as_latest kafka-watcher
-          retag_image_as_latest istio-watcher
